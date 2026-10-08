@@ -1,2 +1,3 @@
-# EDP-Metro-Data
-EDP-Metro-Data Web App
+# EDP Metro Data
+
+React application for EDP Metro visualization.
