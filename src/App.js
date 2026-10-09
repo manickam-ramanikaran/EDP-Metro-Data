@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import "./styles.css";
 
 /* ------------------------------------------------------------------ */
@@ -7,7 +8,7 @@ import "./styles.css";
 
 const FLOWS = {
   direct: ["raw", "conformed", "curated"],
-  sonata: ["raw", "standardised", "conformed", "curated"],
+  standardised: ["raw", "standardised", "conformed", "curated"],
   workplace: ["raw", "conformed", "foundational", "curated"],
   ingestOnly: ["raw", "standardised"],
 };
@@ -15,17 +16,17 @@ const FLOWS = {
 // Each flow type is a "metro line" with its own colour.
 const LINES = {
   direct: { label: "Direct", color: "#31aefc" },
-  sonata: { label: "Standardised", color: "#ffc341" },
+  standardised: { label: "Standardised", color: "#ffc341" },
   workplace: { label: "Workplace", color: "#8ee63f" },
   ingestOnly: { label: "Ingest only", color: "#b461ff" },
 };
 
 const SOURCES = [
-  ["alis_messaging", "Alis Messaging", "direct"],
-  ["alis_pr", "Alis PR", "direct"],
+  ["alis_messaging", "Alis_Messaging", "direct"],
+  ["alis_pr", "Alis_PR", "direct"],
   ["archer", "Archer", "direct"],
   ["autoenrolment", "Autoenrolment", "direct"],
-  ["bpa", "BPA", "sonata"],
+  ["bpa", "BPA", "standardised"],
   ["capita", "Capita", "direct"],
   ["ccaas", "CCaaS", "ingestOnly"],
   ["clara", "Clara", "direct"],
@@ -33,12 +34,12 @@ const SOURCES = [
   ["customerprofile", "CustomerProfile", "direct"],
   ["cra", "CRA", "direct"],
   ["integro", "Integro", "direct"],
-  ["itrmaintenance", "ITRMaintenance", "sonata"],
+  ["itrmaintenance", "ITRMaintenance", "standardised"],
   ["oryx", "Oryx", "direct"],
   ["plal", "PLAL", "direct"],
-  ["reference_data", "Reference Data", "direct"],
+  ["reference_data", "Reference_Data", "direct"],
   ["cispp_main", "CISPP Main", "direct"],
-  ["sonata", "Sonata", "sonata"],
+  ["sonata", "Sonata", "standardised"],
   ["wealth_wizards", "Wealth Wizards", "ingestOnly"],
   ["workplace", "Workplace Insight", "workplace", ""],
 ].map(([id, name, type, note]) => ({
@@ -96,9 +97,9 @@ const LAYERS = [
 
 const CONSUMERS = [
   "Pensions Dashboard",
-  "Long Term Savings",
   "FinWell",
   "MyRL Portal",
+  "CIAM",
   "Consumer Duty Dashboard",
 ];
 
@@ -119,10 +120,10 @@ const TOUR = [
     text: `${countByType("direct")} sources take the direct route: Raw, Conformed, Curated. Clara is one example.`,
   },
   {
-    title: "Sonata flow",
+    title: "Standardised flow",
     source: "sonata",
     target: "journey",
-    text: `${countByType("sonata")} sources, including Sonata, add a Standardised step before Conformed.`,
+    text: `${countByType("standardised")} sources, including Sonata, add a Standardised step before Conformed.`,
   },
   {
     title: "Ingest only",
@@ -159,6 +160,443 @@ const BEAM_PARTICLES = Array.from({ length: 14 }, (_, index) => ({
   left: `${28 + (index % 6) * 8}%`,
 }));
 
+const PUBLIC = process.env.PUBLIC_URL;
+
+/* ------------------------------------------------------------------ */
+/*  CLIENT SPOTLIGHT                                                   */
+/* ------------------------------------------------------------------ */
+
+// Images live in /public/clients. Names and titles are printed on the images themselves.
+const TEAM = [
+  { file: "Eleni.png", name: "Eleni Hadjikakou", role: "Head of Finance Operations" },
+  { file: "Mike.png", name: "Mike Williams", role: "Head of Finance Systems & Change" },
+  { file: "David.png", name: "David Thomson", role: "Head of Data Solutions" },
+  { file: "Philip.png", name: "Philip Quarmby", role: "Head of Data Transformation" },
+];
+const TEAM_INTERVAL = 5000; // ms each person stays on screen
+
+/* ------------------------------------------------------------------ */
+/*  FULL-SCREEN PIXEL-FLOW SHOWCASE                                    */
+/* ------------------------------------------------------------------ */
+
+const SHOW_HOLD = 4200; // ms each person is held on screen
+const SHOW_FLOW = 1900; // ms the pixel flow takes
+const FLOW_SPAN = 0.4; // share of the flow each pixel block spends changing
+const CELL = 24; // block size in image pixels
+const LEVELS = [6, 12, 24]; // mosaic sizes a block passes through
+const BG_W = 88;
+const BG_H = 78;
+
+const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+function PixelShowcase({ startIndex, onClose }) {
+  const canvasRef = useRef(null);
+  const bgRef = useRef(null);
+  const closeRef = useRef(null);
+  const dataRef = useRef(null); // { W, H, ctx, bgCtx, items, cells }
+  const animRef = useRef(null); // { from, to, dir, start }
+  const rafRef = useRef(0);
+  const indexRef = useRef(startIndex);
+
+  const [index, setIndex] = useState(startIndex);
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [running, setRunning] = useState(true);
+  const [flowing, setFlowing] = useState(false);
+
+  const reduced = useMemo(
+    () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
+    []
+  );
+
+  /* ---- drawing ---- */
+  const syncBg = useCallback(() => {
+    const d = dataRef.current;
+    if (d) d.bgCtx.drawImage(d.ctx.canvas, 0, 0, BG_W, BG_H);
+  }, []);
+
+  const drawStill = useCallback(
+    (i) => {
+      const d = dataRef.current;
+      if (!d) return;
+      d.ctx.imageSmoothingEnabled = true;
+      d.ctx.drawImage(d.items[i].img, 0, 0);
+      syncBg();
+    },
+    [syncBg]
+  );
+
+  const drawFrame = useCallback(
+    (from, to, t, dir) => {
+      const { W, H, ctx, items, cells } = dataRef.current;
+      ctx.imageSmoothingEnabled = false;
+      for (const c of cells) {
+        // Wave travels across the photo, with a little noise so blocks flow rather than march.
+        const xn = dir > 0 ? c.x / W : 1 - (c.x + c.w) / W;
+        const delay = Math.min(1, xn * 0.62 + (c.y / H) * 0.12 + c.n * 0.26);
+        const p = clamp01((t - delay * (1 - FLOW_SPAN)) / FLOW_SPAN);
+
+        // First half: old photo breaks into bigger blocks. Second half: new photo resolves.
+        let item;
+        let lvl;
+        if (p < 0.5) {
+          const q = p * 2;
+          item = items[from];
+          lvl = q < 0.25 ? -1 : q < 0.5 ? 0 : q < 0.75 ? 1 : 2;
+        } else {
+          const q = (p - 0.5) * 2;
+          item = items[to];
+          lvl = q < 0.25 ? 2 : q < 0.5 ? 1 : q < 0.75 ? 0 : -1;
+        }
+
+        if (lvl < 0) {
+          ctx.drawImage(item.img, c.x, c.y, c.w, c.h, c.x, c.y, c.w, c.h);
+        } else {
+          const b = LEVELS[lvl];
+          ctx.drawImage(item.levels[lvl], c.x / b, c.y / b, c.w / b, c.h / b, c.x, c.y, c.w, c.h);
+        }
+
+        if (p > 0 && p < 1) {
+          const a = (0.3 * Math.sin(Math.PI * p)).toFixed(2);
+          ctx.fillStyle = `rgba(53,220,255,${a})`;
+          ctx.fillRect(c.x, c.y, c.w, c.h);
+        }
+      }
+    },
+    []
+  );
+
+  const step = useCallback(
+    function tick(now) {
+      const a = animRef.current;
+      if (!a) return;
+      const t = Math.min(1, (now - a.start) / SHOW_FLOW);
+      if (t >= 1) {
+        drawStill(a.to);
+        animRef.current = null;
+        setFlowing(false);
+        return;
+      }
+      drawFrame(a.from, a.to, easeInOut(t), a.dir);
+      syncBg();
+      rafRef.current = requestAnimationFrame(tick);
+    },
+    [drawFrame, drawStill, syncBg]
+  );
+
+  const flowTo = useCallback(
+    (to, dir) => {
+      if (!dataRef.current || animRef.current || to === indexRef.current) return;
+      const from = indexRef.current;
+      indexRef.current = to;
+      setIndex(to);
+      if (reduced) {
+        drawStill(to);
+        return;
+      }
+      animRef.current = { from, to, dir, start: performance.now() };
+      setFlowing(true);
+      rafRef.current = requestAnimationFrame(step);
+    },
+    [reduced, drawStill, step]
+  );
+
+  const next = useCallback(
+    () => flowTo((indexRef.current + 1) % TEAM.length, 1),
+    [flowTo]
+  );
+  const prev = useCallback(
+    () => flowTo((indexRef.current - 1 + TEAM.length) % TEAM.length, -1),
+    [flowTo]
+  );
+
+  /* ---- load images and prepare the mosaic levels ---- */
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      TEAM.map(
+        (person) =>
+          new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = reject;
+            img.src = `${PUBLIC}/clients/${person.file}`;
+          })
+      )
+    )
+      .then((imgs) => {
+        if (cancelled) return;
+        const W = imgs[0].naturalWidth;
+        const H = imgs[0].naturalHeight;
+        const canvas = canvasRef.current;
+        canvas.width = W;
+        canvas.height = H;
+
+        const items = imgs.map((img) => ({
+          img,
+          levels: LEVELS.map((b) => {
+            const small = document.createElement("canvas");
+            small.width = Math.ceil(W / b);
+            small.height = Math.ceil(H / b);
+            const sctx = small.getContext("2d");
+            sctx.imageSmoothingEnabled = true;
+            sctx.imageSmoothingQuality = "high";
+            sctx.drawImage(img, 0, 0, small.width, small.height);
+            return small;
+          }),
+        }));
+
+        const cells = [];
+        for (let y = 0; y < H; y += CELL) {
+          for (let x = 0; x < W; x += CELL) {
+            const noise = Math.abs((Math.sin((x / CELL) * 12.9898 + (y / CELL) * 78.233) * 43758.5453) % 1);
+            cells.push({ x, y, w: Math.min(CELL, W - x), h: Math.min(CELL, H - y), n: noise });
+          }
+        }
+
+        dataRef.current = {
+          W,
+          H,
+          items,
+          cells,
+          ctx: canvas.getContext("2d"),
+          bgCtx: bgRef.current.getContext("2d"),
+        };
+        drawStill(indexRef.current);
+        setReady(true);
+      })
+      .catch(() => !cancelled && setFailed(true));
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, [drawStill]);
+
+  /* ---- autoplay ---- */
+  useEffect(() => {
+    if (!ready || !running || flowing) return undefined;
+    const timer = window.setTimeout(next, reduced ? 6000 : SHOW_HOLD);
+    return () => window.clearTimeout(timer);
+  }, [ready, running, flowing, index, next, reduced]);
+
+  /* ---- keyboard, scroll lock, initial focus ---- */
+  useEffect(() => {
+    const onKey = (event) => {
+      if (!["ArrowRight", "ArrowLeft", "Escape"].includes(event.key)) return;
+      event.stopPropagation(); // keep the guided-tour shortcuts quiet while this is open
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowRight") next();
+      if (event.key === "ArrowLeft") prev();
+    };
+    window.addEventListener("keydown", onKey, true);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [next, prev, onClose]);
+
+  const person = TEAM[index];
+
+  return (
+    <div className="showcase" role="dialog" aria-modal="true" aria-label="Client spotlight">
+      <canvas ref={bgRef} className="showcase-bg" width={BG_W} height={BG_H} aria-hidden="true" />
+      <div className="showcase-vignette" aria-hidden="true" />
+
+      <div className="showcase-top">
+        <b>♛ EDP Data Metro</b>
+        <div className="showcase-actions">
+          <button type="button" onClick={prev} aria-label="Previous person">←</button>
+          <button type="button" onClick={next} aria-label="Next person">→</button>
+          <button type="button" onClick={() => setRunning((v) => !v)}>
+            {running ? "Ⅱ Pause" : "▶ Play"}
+          </button>
+          <button type="button" ref={closeRef} onClick={onClose}>✕ Close</button>
+        </div>
+      </div>
+
+      <div className="showcase-frame">
+        <canvas
+          ref={canvasRef}
+          className="showcase-canvas"
+          role="img"
+          aria-label={`${person.name}, ${person.role}`}
+        />
+        {!ready && !failed && <p className="showcase-msg">Loading photos…</p>}
+        {failed && (
+          <p className="showcase-msg">
+            Couldn&apos;t load the photos. Check that they are in public/clients.
+          </p>
+        )}
+      </div>
+
+      <div className="showcase-foot">
+        {TEAM.map((member, i) => (
+          <button
+            type="button"
+            key={member.file}
+            className={i === index ? "on" : ""}
+            aria-current={i === index}
+            onClick={() => flowTo(i, i > indexRef.current ? 1 : -1)}
+          >
+            {member.name.split(" ")[0]}
+            {i === index && !flowing && ready && (
+              <i
+                key={`${index}-${running}`}
+                className="show-progress"
+                style={{
+                  animationDuration: `${SHOW_HOLD}ms`,
+                  animationPlayState: running ? "running" : "paused",
+                }}
+              />
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TeamSpotlight() {
+  const [pos, setPos] = useState({ index: 0, prev: null });
+  const [userPaused, setUserPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [showcase, setShowcase] = useState(null); // null = closed, otherwise start index
+  const enteredFs = useRef(false);
+  const paused = userPaused || hovered || showcase !== null;
+  const reduced = useMemo(
+    () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
+    []
+  );
+
+  const advance = useCallback(
+    () => setPos((p) => ({ index: (p.index + 1) % TEAM.length, prev: p.index })),
+    []
+  );
+  const goTo = (next) =>
+    setPos((p) => (p.index === next ? p : { index: next, prev: p.index }));
+
+  const openShowcase = () => {
+    setShowcase(pos.index);
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+      document.documentElement
+        .requestFullscreen()
+        .then(() => {
+          enteredFs.current = true;
+        })
+        .catch(() => {});
+    }
+  };
+
+  const closeShowcase = useCallback(() => {
+    setShowcase(null);
+    if (enteredFs.current && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+    enteredFs.current = false;
+  }, []);
+
+  // If the browser leaves full screen (for example the person pressed Esc), close the showcase too.
+  useEffect(() => {
+    if (showcase === null) return undefined;
+    const onChange = () => {
+      if (!document.fullscreenElement && enteredFs.current) {
+        enteredFs.current = false;
+        setShowcase(null);
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, [showcase]);
+
+  // Normal case: the progress bar's animationend moves to the next person, so the
+  // bar and the swap always stay in sync (including pause/resume).
+  // Reduced-motion case: animations are off, so use a plain timer instead.
+  useEffect(() => {
+    if (!reduced || paused) return undefined;
+    const timer = window.setTimeout(advance, TEAM_INTERVAL);
+    return () => window.clearTimeout(timer);
+  }, [reduced, paused, pos.index, advance]);
+
+  const current = TEAM[pos.index];
+
+  return (
+    <section
+      className={`team ${paused ? "is-paused" : ""}`}
+      aria-label="Welcome"
+      style={{ "--iv": `${TEAM_INTERVAL}ms` }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setHovered(true)}
+      onBlur={() => setHovered(false)}
+    >
+      <span className="team-tag">Welcome</span>
+      <div className="team-stage" onClick={openShowcase}>
+        {TEAM.map((person, i) => (
+          <img
+            key={person.file}
+            src={`${PUBLIC}/clients/${person.file}`}
+            alt={i === pos.index ? `${person.name}, ${person.role}` : ""}
+            className={`team-img ${i === pos.index ? "active" : ""} ${i === pos.prev ? "prev" : ""}`}
+            decoding="async"
+            draggable="false"
+          />
+        ))}
+        <span key={pos.index} className="team-sweep" aria-hidden="true" />
+        <button
+          type="button"
+          className="team-expand"
+          aria-label="View photos full screen"
+          onClick={(event) => {
+            event.stopPropagation();
+            openShowcase();
+          }}
+        >
+          ⤢
+        </button>
+      </div>
+      <div className="team-foot">
+        <div className="team-dots">
+          {TEAM.map((person, i) => (
+            <button
+              type="button"
+              key={person.file}
+              className={i === pos.index ? "on" : ""}
+              aria-label={`Show ${person.name}`}
+              aria-current={i === pos.index}
+              onClick={() => goTo(i)}
+            >
+              <i
+                className="fill"
+                onAnimationEnd={i === pos.index && !reduced ? advance : undefined}
+              />
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="team-pause"
+          aria-label={userPaused ? "Resume slideshow" : "Pause slideshow"}
+          onClick={() => setUserPaused((v) => !v)}
+        >
+          {userPaused ? "▶" : "Ⅱ"}
+        </button>
+      </div>
+      <span className="sr-only" aria-live="polite">
+        {current.name}, {current.role}
+      </span>
+      {showcase !== null &&
+        createPortal(
+          <PixelShowcase startIndex={showcase} onClose={closeShowcase} />,
+          document.body
+        )}
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  HELPERS                                                            */
 /* ------------------------------------------------------------------ */
@@ -183,8 +621,6 @@ function useCountUp(target, duration = 1400) {
   }, [target, duration]);
   return value;
 }
-
-const PUBLIC = process.env.PUBLIC_URL;
 
 /* ------------------------------------------------------------------ */
 /*  APP                                                                */
@@ -427,6 +863,8 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        <TeamSpotlight />
 
         <div className="metrics">
           <div>▤ <b>{sourceCount}</b><small>Source Systems</small></div>
