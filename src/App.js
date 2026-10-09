@@ -97,9 +97,9 @@ const LAYERS = [
 
 const CONSUMERS = [
   "Pensions Dashboard",
+  "Long Term Savings",
   "FinWell",
   "MyRL Portal",
-  "CIAM",
   "Consumer Duty Dashboard",
 ];
 
